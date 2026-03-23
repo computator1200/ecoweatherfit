@@ -142,7 +142,7 @@ SUSTAINABILITY_NUDGES = {
 # ──────────────────────────────────────────────
 # 10. GEMINI API SETTINGS
 # ──────────────────────────────────────────────
-GEMINI_MODEL_NAME       = "gemini-2.0-flash"
+GEMINI_MODEL_NAME       = "gemini-2.5-flash"
 GEMINI_MAX_TOKENS       = 512
 GEMINI_TEMPERATURE      = 0.4      # lower = more deterministic
 GEMINI_TIMEOUT_SECONDS  = 15
