@@ -143,7 +143,7 @@ SUSTAINABILITY_NUDGES = {
 # 10. GEMINI API SETTINGS
 # ──────────────────────────────────────────────
 GEMINI_MODEL_NAME       = "gemini-2.5-flash"
-GEMINI_MAX_TOKENS       = 512
+GEMINI_MAX_TOKENS       = 1024     # Gemini 2.5 uses some tokens for reasoning; 1024 keeps headroom
 GEMINI_TEMPERATURE      = 0.4      # lower = more deterministic
 GEMINI_TIMEOUT_SECONDS  = 15
 GEMINI_MAX_RETRIES      = 2

@@ -1,0 +1,42 @@
+.git
+.gitignore
+.venv
+venv
+env
+__pycache__
+**/__pycache__
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache
+.mypy_cache
+.ruff_cache
+.ipynb_checkpoints
+notebooks
+tests
+
+# Docs & large non-code artifacts — keep the image lean
+*.docx
+*.pdf
+~$*
+~WRL*.tmp
+*.zip
+DEVELOPMENT_LOG.md
+CONTRIBUTING.md
+
+# Runtime state — container creates its own
+cache/
+logs/
+.env
+.env.*
+
+# Pre-saved models: excluded so the container is not poisoned by a
+# Keras blob produced under a different TF version. The app retrains
+# on first run under the container's pinned TF 2.18.
+models/saved/
+
+# IDE / OS
+.vscode
+.idea
+.DS_Store
+Thumbs.db

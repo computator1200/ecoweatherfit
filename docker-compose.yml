@@ -1,0 +1,16 @@
+services:
+  ecoweatherfit:
+    build: .
+    image: ecoweatherfit:latest
+    container_name: ecoweatherfit
+    ports:
+      - "8501:8501"
+    env_file:
+      - path: .env
+        required: false
+    volumes:
+      # Persist retrained models, fetched data cache, and logs across restarts.
+      - ./cache:/app/cache
+      - ./logs:/app/logs
+      - ./models/saved:/app/models/saved
+    restart: unless-stopped

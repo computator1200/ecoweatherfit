@@ -20,7 +20,15 @@ models/saved/
 # IDE
 .vscode/
 .idea/
+.claude/
 
 # OS
 .DS_Store
 Thumbs.db
+
+# Non-code artifacts (reports, archives, Office lock/tmp files)
+*.docx
+*.pdf
+*.zip
+~$*
+~*.tmp

@@ -219,8 +219,19 @@ def render_forecast_comparison(
 # ──────────────────────────────────────────────
 # Model Performance Metrics
 # ──────────────────────────────────────────────
-def render_model_metrics(rf_metrics: Dict, lstm_metrics: Dict):
-    """Display model performance comparison table."""
+def render_model_metrics(
+    rf_metrics: Dict,
+    lstm_metrics: Dict,
+    lstm_training_metrics: Optional[Dict] = None,
+):
+    """Display model performance comparison table.
+
+    Parameters
+    ----------
+    rf_metrics : per-target {mae, rmse, r2} dict for Random Forest
+    lstm_metrics : per-target {mae, rmse, r2} dict for LSTM (test set)
+    lstm_training_metrics : optional {epochs_run, val_loss, val_mae, ...} from training
+    """
     st.markdown("## 📈 Model Performance (Test Set)")
 
     if not rf_metrics and not lstm_metrics:
@@ -247,12 +258,34 @@ def render_model_metrics(rf_metrics: Dict, lstm_metrics: Dict):
     with col2:
         st.markdown("### 🧠 LSTM Neural Network")
         if lstm_metrics:
-            if "val_loss" in lstm_metrics:
-                st.metric("Validation Loss (MSE)", f"{lstm_metrics['val_loss']:.4f}")
-                st.metric("Validation MAE", f"{lstm_metrics['val_mae']:.4f}")
-            st.metric("Epochs Trained", lstm_metrics.get("epochs_run", "N/A"))
+            rows = []
+            for var, m in lstm_metrics.items():
+                rows.append({
+                    "Variable": var,
+                    "MAE": f"{m['mae']:.3f}",
+                    "RMSE": f"{m['rmse']:.3f}",
+                    "R²": f"{m['r2']:.3f}",
+                })
+            st.dataframe(pd.DataFrame(rows), hide_index=True, use_container_width=True)
         else:
-            st.info("LSTM model not yet trained.")
+            st.info("LSTM test metrics unavailable (test sequences may be too short).")
+
+        if lstm_training_metrics:
+            sub1, sub2, sub3 = st.columns(3)
+            with sub1:
+                st.metric("Epochs Trained", lstm_training_metrics.get("epochs_run", "N/A"))
+            with sub2:
+                val_loss = lstm_training_metrics.get("val_loss")
+                st.metric(
+                    "Val Loss (MSE)",
+                    f"{val_loss:.4f}" if isinstance(val_loss, (int, float)) else "N/A",
+                )
+            with sub3:
+                val_mae = lstm_training_metrics.get("val_mae")
+                st.metric(
+                    "Val MAE",
+                    f"{val_mae:.4f}" if isinstance(val_mae, (int, float)) else "N/A",
+                )
 
 
 # ──────────────────────────────────────────────
@@ -286,24 +319,43 @@ def render_recommendation(recommendation: Dict):
     # Constraints summary (collapsible)
     constraints = recommendation.get("constraints")
     if constraints:
-        with st.expander("🔍 View Weather Constraints (Heuristic Analysis)"):
+        with st.expander("🔍 View Weather Constraints (Heuristic Analysis)", expanded=True):
+            summary = (
+                f"**Date:** {constraints.date}  •  "
+                f"**Category:** {constraints.temperature_category.replace('_', ' ').title()}  •  "
+                f"**Temp:** {constraints.temp:.1f}°C  •  "
+                f"**Rain Prob:** {constraints.rain_probability * 100:.0f}%  •  "
+                f"**Wind:** {constraints.wind_speed:.1f} km/h"
+            )
+            st.markdown(summary)
+
             c1, c2, c3 = st.columns(3)
             with c1:
-                st.markdown("**Mandatory Items:**")
-                for item in constraints.mandatory_items:
-                    st.markdown(f"  ✅ {item}")
+                st.markdown("**✅ Mandatory Items**")
+                if constraints.mandatory_items:
+                    for item in constraints.mandatory_items:
+                        st.markdown(f"- {item}")
+                else:
+                    st.markdown("_No mandatory items (mild conditions)_")
             with c2:
-                st.markdown("**Avoid:**")
-                for item in constraints.avoid_items:
-                    st.markdown(f"  ❌ {item}")
-                if not constraints.avoid_items:
-                    st.markdown("  No restrictions")
+                st.markdown("**❌ Avoid**")
+                if constraints.avoid_items:
+                    for item in constraints.avoid_items:
+                        st.markdown(f"- {item}")
+                else:
+                    st.markdown("_No restrictions_")
             with c3:
-                st.markdown("**Warnings:**")
-                for w in constraints.warnings:
-                    st.markdown(f"  ⚠️ {w}")
-                if not constraints.warnings:
-                    st.markdown("  No weather warnings")
+                st.markdown("**⚠️ Warnings**")
+                if constraints.warnings:
+                    for w in constraints.warnings:
+                        st.markdown(f"- {w}")
+                else:
+                    st.markdown("_No weather warnings_")
+
+            if constraints.layering_advice:
+                st.markdown("**🧥 Layering Guide**")
+                for layer in constraints.layering_advice:
+                    st.markdown(f"- {layer}")
 
 
 # ──────────────────────────────────────────────
@@ -314,8 +366,50 @@ def render_week_recommendation(week_rec: Dict):
     if not week_rec:
         return
 
-    with st.expander("📅 View Full 7-Day Wardrobe Plan", expanded=False):
-        st.markdown(week_rec.get("recommendation", ""))
+    text = (week_rec.get("recommendation") or "").strip()
+    source = week_rec.get("source", "unknown")
+
+    with st.expander("📅 View Full 7-Day Wardrobe Plan", expanded=True):
+        if source == "hybrid":
+            st.caption("🤖 Generated by Gemini AI + heuristic guardrails")
+        else:
+            st.caption("📋 Generated from weather-based heuristic rules")
+
+        if text:
+            st.markdown(text)
+        else:
+            st.warning(
+                "Weekly plan could not be generated. Check the daily recommendation above "
+                "for guidance, or review the forecast table below."
+            )
+
+        # Always surface the structured per-day breakdown — it is never empty.
+        week = week_rec.get("week_constraints")
+        if week and getattr(week, "daily", None):
+            st.markdown("**Day-by-day essentials:**")
+            for d in week.daily:
+                emoji = _week_emoji(d.temperature_category, d.precipitation)
+                items = ", ".join(d.mandatory_items[:3]) if d.mandatory_items else "flexible outfit day"
+                st.markdown(
+                    f"{emoji} **{d.date}** — {d.temp:.0f}°C, "
+                    f"{d.temperature_category.replace('_', ' ')} — {items}"
+                )
+
+
+def _week_emoji(category: str, precip: float) -> str:
+    if precip > 5:
+        return "🌧️"
+    if precip > 1:
+        return "🌦️"
+    mapping = {
+        "freezing": "🥶",
+        "very_cold": "❄️",
+        "cold": "🌬️",
+        "mild": "🌤️",
+        "warm": "☀️",
+        "hot": "🔥",
+    }
+    return mapping.get(category, "🌤️")
 
 
 # ──────────────────────────────────────────────

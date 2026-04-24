@@ -272,7 +272,15 @@ class WeatherLSTM:
         if not model_path.exists() or not meta_path.exists():
             return False
 
-        self.model = load_model(model_path)
+        try:
+            self.model = load_model(model_path)
+        except (TypeError, ValueError, KeyError) as exc:
+            logger.warning(
+                "Saved LSTM at %s is incompatible with the installed "
+                "TensorFlow/Keras version (%s). Will retrain from scratch.",
+                model_path, exc,
+            )
+            return False
         meta = joblib.load(meta_path)
         self.metrics = meta.get("metrics", {})
         self.n_features = meta.get("n_features", 0)

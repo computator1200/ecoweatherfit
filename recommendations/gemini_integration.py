@@ -263,7 +263,10 @@ IMPORTANT: Prioritise "Shop Your Wardrobe" — help them use what they already h
 
         try:
             response = self._model.generate_content(prompt)
-            text = response.text
+            text = _safe_response_text(response)
+            if not text or not text.strip():
+                logger.warning("Gemini returned empty day response — falling back to heuristic.")
+                return self._heuristic_only_text(constraints, user_profile), False
             logger.info("Gemini response received (%d chars)", len(text))
             return text, True
         except Exception as exc:
@@ -274,7 +277,11 @@ IMPORTANT: Prioritise "Shop Your Wardrobe" — help them use what they already h
         prompt = self._build_week_prompt(week, user_profile)
         try:
             response = self._model.generate_content(prompt)
-            return response.text
+            text = _safe_response_text(response)
+            if not text or not text.strip():
+                logger.warning("Gemini returned empty week response — falling back to heuristic.")
+                return self._heuristic_week_text(week, user_profile)
+            return text
         except Exception as exc:
             logger.error("Gemini week call failed: %s", exc)
             return self._heuristic_week_text(week, user_profile)
@@ -385,6 +392,32 @@ IMPORTANT: Prioritise "Shop Your Wardrobe" — help them use what they already h
 # ──────────────────────────────────────────────
 # Utility
 # ──────────────────────────────────────────────
+def _safe_response_text(response) -> str:
+    """
+    Extract text from a Gemini response without raising on empty outputs.
+
+    The google-generativeai SDK raises ValueError on `.text` when the
+    response has no text parts (e.g. the whole token budget was spent on
+    reasoning tokens, or content was blocked). This helper returns an
+    empty string in those cases so the caller can fall back gracefully.
+    """
+    try:
+        text = response.text
+        if text is not None:
+            return text
+    except (ValueError, AttributeError):
+        pass
+
+    parts = []
+    for candidate in getattr(response, "candidates", []) or []:
+        content = getattr(candidate, "content", None)
+        for part in getattr(content, "parts", []) or []:
+            piece = getattr(part, "text", "") or ""
+            if piece:
+                parts.append(piece)
+    return "".join(parts)
+
+
 def _weather_emoji(category: str, precip: float) -> str:
     if precip > 5:
         return "🌧️"

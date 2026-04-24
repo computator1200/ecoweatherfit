@@ -10,7 +10,7 @@ numpy>=1.24,<3.0
 
 # Machine Learning
 scikit-learn>=1.3,<2.0
-tensorflow>=2.15,<2.19      # Pin to 2.18.x for protobuf compatibility with Gemini SDK
+tensorflow==2.18.0          # Hard-pin: Keras 3 serialization (quantization_config) is not compatible across 2.15 ↔ 2.16+
 
 # Visualisation
 matplotlib>=3.7,<4.0

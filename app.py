@@ -125,6 +125,8 @@ def train_models(city: str):
                 target_cols=list(split.y_test.columns),
             )
 
+    lstm_training_metrics = dict(lstm.metrics) if lstm.metrics else {}
+
     artifacts = {
         "feature_scaler": split.feature_scaler,
         "target_scaler": split.target_scaler,
@@ -133,6 +135,7 @@ def train_models(city: str):
         "split_metadata": split.metadata,
         "featured_data": featured,
         "X_train": split.X_train,
+        "lstm_training_metrics": lstm_training_metrics,
     }
 
     return rf, lstm, rf_test_metrics, lstm_test_metrics, artifacts
@@ -266,7 +269,11 @@ def main():
             render_forecast_table(lstm_forecast, "LSTM Forecast")
 
         # ── Step 4: Model Metrics ──
-        render_model_metrics(rf_metrics, lstm_metrics)
+        render_model_metrics(
+            rf_metrics,
+            lstm_metrics,
+            lstm_training_metrics=artifacts.get("lstm_training_metrics"),
+        )
 
         # ── Step 5: Hybrid Recommendations ──
         st.markdown("---")
