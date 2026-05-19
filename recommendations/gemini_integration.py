@@ -175,10 +175,15 @@ class GeminiAdvisor:
         gender = user_profile.get("gender", "unisex")
         style = user_profile.get("style_preference", "casual")
 
+        # Build a human-readable date string with the correct day-of-week so
+        # the model does not have to infer it (Gemini has been observed to
+        # hallucinate the wrong weekday from an ISO date string alone).
+        date_str = _format_date_with_dow(constraints.date)
+
         prompt = f"""You are EcoWeatherFit, a sustainable fashion advisor that helps people
 dress appropriately for the weather using clothes they ALREADY OWN.
 
-WEATHER FORECAST for {constraints.date}:
+WEATHER FORECAST for {date_str}:
 - Temperature: {constraints.temp:.1f}°C (Category: {constraints.temperature_category})
 - Humidity: {constraints.humidity:.0f}%
 - Wind Speed: {constraints.wind_speed:.1f} km/h
@@ -214,6 +219,14 @@ Generate a friendly, conversational outfit recommendation (150-200 words) that:
 3. Prioritises reusing existing wardrobe items
 4. Provides specific layering guidance
 5. Ends with a brief sustainability tip
+
+OUTPUT RULES:
+- Refer to the date exactly as "{date_str}" or just "today/tomorrow"; do
+  NOT invent a different day-of-week.
+- Reply in plain prose. Do NOT use markdown headings (no "**heading**" lines,
+  no "###" symbols). Light inline emphasis (single sentences ending in
+  punctuation) is fine.
+- Do not start or end the reply with stray ``**`` characters.
 """
         return prompt
 
@@ -223,14 +236,16 @@ Generate a friendly, conversational outfit recommendation (150-200 words) that:
 
         days_summary = ""
         for d in week.daily:
+            day_label = _format_date_with_dow(d.date)
             days_summary += (
-                f"- {d.date}: {d.temp:.0f}°C, {d.precipitation:.1f}mm rain, "
+                f"- {day_label}: {d.temp:.0f}°C, {d.precipitation:.1f}mm rain, "
                 f"{d.wind_speed:.0f}km/h wind ({d.temperature_category})\n"
             )
 
         prompt = f"""You are EcoWeatherFit, a sustainable fashion advisor.
 
-7-DAY FORECAST SUMMARY:
+7-DAY FORECAST SUMMARY (dates already include the correct day-of-week — use
+them verbatim, do not invent different weekdays):
 {days_summary}
 
 Overall pattern: {week.overall_category}
@@ -246,6 +261,12 @@ Generate a concise 7-day wardrobe plan (200-250 words) that:
 5. Includes one weekly garment care tip
 
 IMPORTANT: Prioritise "Shop Your Wardrobe" — help them use what they already have.
+
+OUTPUT RULES:
+- Reply in plain prose. Do NOT use markdown headings (no "**heading**" lines,
+  no "###" symbols). Inline emphasis with full sentences is fine.
+- Do not start or end the reply with stray ``**`` characters.
+- Use the exact day-of-week labels supplied above.
 """
         return prompt
 
@@ -263,7 +284,7 @@ IMPORTANT: Prioritise "Shop Your Wardrobe" — help them use what they already h
 
         try:
             response = self._model.generate_content(prompt)
-            text = _safe_response_text(response)
+            text = _sanitize_genai_text(_safe_response_text(response))
             if not text or not text.strip():
                 logger.warning("Gemini returned empty day response — falling back to heuristic.")
                 return self._heuristic_only_text(constraints, user_profile), False
@@ -277,7 +298,7 @@ IMPORTANT: Prioritise "Shop Your Wardrobe" — help them use what they already h
         prompt = self._build_week_prompt(week, user_profile)
         try:
             response = self._model.generate_content(prompt)
-            text = _safe_response_text(response)
+            text = _sanitize_genai_text(_safe_response_text(response))
             if not text or not text.strip():
                 logger.warning("Gemini returned empty week response — falling back to heuristic.")
                 return self._heuristic_week_text(week, user_profile)
@@ -392,6 +413,46 @@ IMPORTANT: Prioritise "Shop Your Wardrobe" — help them use what they already h
 # ──────────────────────────────────────────────
 # Utility
 # ──────────────────────────────────────────────
+def _format_date_with_dow(date_value) -> str:
+    """Return a date string with explicit day-of-week, e.g. "Sun 17 May 2026".
+
+    Accepts a ``pd.Timestamp``, a ``datetime``/``date``, or an ISO-format
+    string. Falls back to ``str(date_value)`` for anything unparseable so
+    the prompt never explodes on a weird input.
+    """
+    try:
+        ts = pd.to_datetime(date_value)
+        return ts.strftime("%a %d %b %Y")
+    except (ValueError, TypeError):
+        return str(date_value)
+
+
+def _sanitize_genai_text(text: str) -> str:
+    """Strip stray markdown headings and dangling ``**`` from a GenAI reply.
+
+    Inline bold (``**word**``) is preserved because Streamlit renders it,
+    but unmatched leading/trailing ``**`` tokens — which leak into the UI
+    as literal asterisks — are removed.
+    """
+    if not text:
+        return text
+    cleaned = text.strip()
+    # Drop a bare leading "**Heading" or "**Heading\n" pattern.
+    while cleaned.startswith("**") and cleaned.count("**") % 2 == 1:
+        # Strip the unmatched opening ``**`` and the next line break.
+        cleaned = cleaned[2:].lstrip()
+        if "\n" in cleaned:
+            cleaned = cleaned.split("\n", 1)[1].lstrip()
+        else:
+            break
+    # Drop a trailing unmatched ``**``.
+    if cleaned.endswith("**") and cleaned.count("**") % 2 == 1:
+        cleaned = cleaned[:-2].rstrip()
+    # Collapse markdown level-3 headings used as section dividers.
+    cleaned = cleaned.replace("\n### ", "\n").replace("\n## ", "\n")
+    return cleaned
+
+
 def _safe_response_text(response) -> str:
     """
     Extract text from a Gemini response without raising on empty outputs.

@@ -229,6 +229,11 @@ def fetch_meteostat_historical(
         df.index.name = "time"
         df.index = pd.to_datetime(df.index)
 
+        # Ensure all target variables exist (fill with NaN if missing)
+        for var in TARGET_VARIABLES:
+            if var not in df.columns:
+                df[var] = np.nan
+
         if use_cache:
             _save_cache(df, cache_path)
 
@@ -350,6 +355,156 @@ def fetch_owm_current(
 
 
 # ──────────────────────────────────────────────
+# 3a. OPENWEATHERMAP — Historical observations (paid tier)
+# ──────────────────────────────────────────────
+def fetch_owm_history_range(
+    city: str,
+    start_date: pd.Timestamp,
+    end_date: pd.Timestamp,
+    use_cache: bool = True,
+) -> pd.DataFrame:
+    """Return one row per day of historical observations from OWM.
+
+    Uses the One Call 3.0 *timemachine* endpoint, which returns the hourly
+    observations for a given UNIX day; the helper aggregates those hours to
+    daily means/sums to match the Meteostat schema. Each day's response is
+    cached individually so repeated runs only fetch new days.
+
+    Requires the One Call by Call paid subscription on the OWM account.
+
+    Parameters
+    ----------
+    city : str
+        Must exist in ``DEFAULT_LOCATIONS``.
+    start_date, end_date : pd.Timestamp
+        Inclusive range of dates to fetch (tz-naive or tz-aware; treated as UTC).
+    use_cache : bool
+        If True, reuse cached per-day responses.
+
+    Returns
+    -------
+    pd.DataFrame
+        One row per day with the same columns as ``fetch_meteostat_historical``
+        plus a ``source`` column = "owm-history" so the bridge call is
+        traceable in logs.
+
+    Raises
+    ------
+    DataAcquisitionError
+        If the API key is missing or the subscription tier doesn't include
+        the timemachine endpoint.
+    """
+    if city not in DEFAULT_LOCATIONS:
+        raise ValueError(
+            f"Unknown city '{city}'. Available: {list(DEFAULT_LOCATIONS)}"
+        )
+    if not OPENWEATHERMAP_API_KEY:
+        raise DataAcquisitionError(
+            "OWM_API_KEY not set — cannot bridge historical gap."
+        )
+
+    loc = DEFAULT_LOCATIONS[city]
+    start = pd.Timestamp(start_date).normalize()
+    end = pd.Timestamp(end_date).normalize()
+    if end < start:
+        return pd.DataFrame()
+
+    rows = []
+    day = start
+    while day <= end:
+        day_row = _fetch_owm_history_one_day(loc, city, day, use_cache=use_cache)
+        if day_row is not None:
+            rows.append(day_row)
+        day += pd.Timedelta(days=1)
+
+    if not rows:
+        return pd.DataFrame()
+
+    df = pd.DataFrame(rows).set_index("time").sort_index()
+    df["source"] = "owm-history"
+    logger.info(
+        "OWM history bridge: %d daily rows for %s (%s to %s)",
+        len(df), city, start.date(), end.date(),
+    )
+    return df
+
+
+def _fetch_owm_history_one_day(
+    loc: Dict, city: str, day: pd.Timestamp, use_cache: bool = True,
+) -> Optional[Dict]:
+    """Fetch one day of hourly history via One Call 3.0 timemachine and aggregate."""
+    cache_path = _cache_key("owm_history", city=city, date=str(day.date()))
+    if use_cache:
+        cached = _load_cache(cache_path, max_age_hours=24 * 365)  # never expire
+        if cached is not None and len(cached) == 1:
+            return cached.reset_index().iloc[0].to_dict()
+
+    url = "https://api.openweathermap.org/data/3.0/onecall/timemachine"
+    params = {
+        "lat":   loc["lat"],
+        "lon":   loc["lon"],
+        "dt":    int(day.tz_localize("UTC").timestamp())
+                  if day.tzinfo is None else int(day.timestamp()),
+        "appid": OPENWEATHERMAP_API_KEY,
+        "units": "metric",
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        if resp.status_code in (401, 403):
+            raise DataAcquisitionError(
+                f"OWM timemachine returned {resp.status_code} — the "
+                "account's subscription tier does not include the "
+                "One Call by Call historical endpoint."
+            )
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as exc:
+        logger.warning(
+            "OWM history request failed for %s on %s: %s",
+            city, day.date(), exc,
+        )
+        return None
+
+    # The timemachine endpoint returns a "data" list of hourly observations
+    # (typically 24 entries, one per hour of the requested UTC day). One
+    # Call 3.0 returns roughly the same schema as the live current weather
+    # endpoint per entry; aggregate to daily statistics consistent with the
+    # Meteostat schema.
+    hours = data.get("data", [])
+    if not hours:
+        return None
+
+    temps = [h.get("temp") for h in hours if "temp" in h]
+    humidities = [h.get("humidity") for h in hours if "humidity" in h]
+    pressures = [h.get("pressure") for h in hours if "pressure" in h]
+    winds = [h.get("wind_speed", 0.0) for h in hours]
+    precs = [
+        h.get("rain", {}).get("1h", 0.0) if isinstance(h.get("rain"), dict) else 0.0
+        for h in hours
+    ]
+    snows = [
+        h.get("snow", {}).get("1h", 0.0) if isinstance(h.get("snow"), dict) else 0.0
+        for h in hours
+    ]
+    row = {
+        "time":          day.normalize().tz_localize(None) if day.tzinfo is None else day.normalize().tz_convert(None),
+        "temp":          float(np.mean(temps)) if temps else np.nan,
+        "temp_min":      float(np.min(temps)) if temps else np.nan,
+        "temp_max":      float(np.max(temps)) if temps else np.nan,
+        "humidity":      float(np.mean(humidities)) if humidities else np.nan,
+        "pressure":      float(np.mean(pressures)) if pressures else np.nan,
+        "wind_speed":    float(np.mean(winds)) * 3.6,  # m/s → km/h
+        "wpgt":          float(np.max(winds)) * 3.6 if winds else np.nan,
+        "precipitation": float(np.sum(precs) + np.sum(snows)),
+    }
+
+    # Persist per-day cache so the bridge is incremental
+    if use_cache:
+        _save_cache(pd.DataFrame([row]).set_index("time"), cache_path)
+    return row
+
+
+# ──────────────────────────────────────────────
 # 3. OPENWEATHERMAP — 7‑Day Forecast
 # ──────────────────────────────────────────────
 def fetch_owm_forecast(
@@ -402,8 +557,79 @@ def fetch_owm_forecast(
 
     loc = DEFAULT_LOCATIONS[city]
 
-    # ── Try One Call API 3.0 first (requires subscription) ──
-    # Fallback: 5‑day / 3‑hour free endpoint, aggregated to daily.
+    # ── Preferred path: One Call API 3.0 ──
+    # Gives a clean 8-day daily forecast (instead of 5 days at 3-hour
+    # granularity that has to be aggregated). Requires the One Call by
+    # Call paid subscription on the OWM account; falls back to the free
+    # 5-day/3-hour endpoint on any non-200 response or schema error.
+    daily = _try_onecall_forecast(loc, city)
+    if daily is None:
+        daily = _fetch_5day_3h_aggregated(loc, city)
+
+    daily.index.name = "time"
+    if use_cache:
+        _save_cache(daily, cache_path)
+    logger.info("OWM forecast: %d days retrieved for %s", len(daily), city)
+    return daily
+
+
+def _try_onecall_forecast(loc: Dict, city: str) -> Optional[pd.DataFrame]:
+    """Return a daily forecast frame from One Call 3.0, or None on failure."""
+    url = "https://api.openweathermap.org/data/3.0/onecall"
+    params = {
+        "lat":     loc["lat"],
+        "lon":     loc["lon"],
+        "appid":   OPENWEATHERMAP_API_KEY,
+        "units":   "metric",
+        "exclude": "minutely,hourly,alerts",  # keep current+daily only
+    }
+    try:
+        resp = requests.get(url, params=params, timeout=15)
+        if resp.status_code in (401, 403):
+            # Not subscribed to One Call by Call — silently fall back.
+            logger.info(
+                "OWM One Call 3.0 unavailable (HTTP %d): falling back to "
+                "5-day/3-hour endpoint.", resp.status_code,
+            )
+            return None
+        resp.raise_for_status()
+        data = resp.json()
+    except requests.RequestException as exc:
+        logger.warning(
+            "OWM One Call request failed (%s) — falling back to 5-day/3-hour.",
+            exc,
+        )
+        return None
+
+    daily_list = data.get("daily", [])
+    if not daily_list:
+        return None
+
+    records = []
+    for d in daily_list:
+        records.append({
+            "time":          pd.to_datetime(d["dt"], unit="s", utc=True),
+            "temp":          d["temp"]["day"],
+            "feels_like":    d["feels_like"]["day"],
+            "temp_min":      d["temp"]["min"],
+            "temp_max":      d["temp"]["max"],
+            "humidity":      d["humidity"],
+            "pressure":      d["pressure"],
+            "wind_speed":    d["wind_speed"] * 3.6,    # m/s → km/h
+            "clouds":        d["clouds"],
+            "precipitation": d.get("rain", 0.0) + d.get("snow", 0.0),
+            "pop":           d.get("pop", 0.0),
+            "weather_main":  d["weather"][0]["main"]
+                              if d.get("weather") else "Unknown",
+        })
+
+    df = pd.DataFrame(records).set_index("time")
+    logger.info("OWM One Call 3.0: %d daily rows for %s", len(df), city)
+    return df
+
+
+def _fetch_5day_3h_aggregated(loc: Dict, city: str) -> pd.DataFrame:
+    """Fallback path: free 5-day/3-hour endpoint aggregated to daily."""
     url = "https://api.openweathermap.org/data/2.5/forecast"
     params = {
         "lat":   loc["lat"],
@@ -411,7 +637,6 @@ def fetch_owm_forecast(
         "appid": OPENWEATHERMAP_API_KEY,
         "units": "metric",
     }
-
     try:
         resp = requests.get(url, params=params, timeout=15)
         resp.raise_for_status()
@@ -421,7 +646,6 @@ def fetch_owm_forecast(
             f"OWM forecast request failed: {exc}"
         ) from exc
 
-    # Parse 3‑hourly entries and aggregate to daily
     records = []
     for entry in data.get("list", []):
         records.append({
@@ -438,13 +662,11 @@ def fetch_owm_forecast(
                 entry.get("rain", {}).get("3h", 0.0)
                 + entry.get("snow", {}).get("3h", 0.0)
             ),
-            "pop":           entry.get("pop", 0.0),  # probability of precip
+            "pop":           entry.get("pop", 0.0),
             "weather_main":  entry["weather"][0]["main"],
         })
 
     df_3h = pd.DataFrame(records).set_index("time")
-
-    # Aggregate to daily: mean for most, sum for precipitation, max for pop
     daily = df_3h.resample("D").agg({
         "temp":          "mean",
         "feels_like":    "mean",
@@ -456,25 +678,15 @@ def fetch_owm_forecast(
         "clouds":        "mean",
         "precipitation": "sum",
         "pop":           "max",
-    }).dropna(how="all")
-
-    # Keep only 7 days (the free endpoint gives ≤5, One Call gives 8)
-    daily = daily.head(7)
-    daily.index.name = "time"
-
-    # Attempt to add dominant weather description per day
+    }).dropna(how="all").head(8)
     try:
-        weather_daily = df_3h.groupby(df_3h.index.date)["weather_main"].agg(
+        wm = df_3h.groupby(df_3h.index.date)["weather_main"].agg(
             lambda x: x.mode()[0] if not x.mode().empty else "Unknown"
         )
-        daily["weather_main"] = weather_daily.values[:len(daily)]
+        daily["weather_main"] = wm.values[:len(daily)]
     except Exception:
         daily["weather_main"] = "Unknown"
-
-    if use_cache:
-        _save_cache(daily, cache_path)
-
-    logger.info("OWM forecast: %d days retrieved for %s", len(daily), city)
+    logger.info("OWM 5-day/3h: aggregated %d days for %s", len(daily), city)
     return daily
 
 

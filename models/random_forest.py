@@ -129,6 +129,21 @@ class WeatherRandomForest:
         predictions = []
         last_date = working.index.max()
 
+        # Persistence fallback for non-target columns: use the trailing 7-day
+        # mean of the most recent observed window. Without this, every
+        # appended prediction row has NaN for fields like temp_min, temp_max,
+        # pressure, wpgt — and the downstream lag/rolling features collapse
+        # toward zero, dragging the recursive forecast toward a constant.
+        recent_window = working.tail(7).copy()
+        non_target_means = {}
+        for col in working.columns:
+            if col in target_cols:
+                continue
+            try:
+                non_target_means[col] = float(recent_window[col].mean(skipna=True))
+            except (TypeError, ValueError):
+                non_target_means[col] = np.nan
+
         for day_offset in range(1, FORECAST_HORIZON_DAYS + 1):
             # Re-engineer features from the growing working set
             featured = engineer_features(working, drop_na_rows=False)
@@ -148,16 +163,17 @@ class WeatherRandomForest:
 
             predictions.append(pred_dict)
 
-            # Append prediction as a new row for the next recursive step
-            new_row = pd.DataFrame(
-                {col: [pred_dict.get(col, np.nan)] for col in working.columns},
-                index=[pred_date],
-            )
+            # Build the next-day row: predicted targets + persistence for the
+            # rest. This keeps lag/rolling features in-distribution for the
+            # next recursive step instead of letting NaNs cascade.
+            row_data = {}
+            for col in working.columns:
+                if col in target_cols:
+                    row_data[col] = pred_dict.get(col, np.nan)
+                else:
+                    row_data[col] = non_target_means.get(col, np.nan)
+            new_row = pd.DataFrame(row_data, index=[pred_date])
             new_row.index.name = "time"
-            # Fill known target values from prediction
-            for col in target_cols:
-                if col in new_row.columns:
-                    new_row[col] = pred_dict.get(col, np.nan)
             working = pd.concat([working, new_row])
 
         forecast_dates = pd.date_range(

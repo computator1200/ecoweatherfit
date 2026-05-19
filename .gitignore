@@ -32,3 +32,18 @@ Thumbs.db
 *.zip
 ~$*
 ~*.tmp
+
+# Generated report figures (regeneratable via scripts/generate_backtest_figures.py)
+figures/
+
+# Browser test artifacts produced during interactive testing
+app-test-output/
+
+# Historical pre-bridge dashboard exports (superseded by back-test charts)
+saved output/
+
+# Backup copies of report drafts
+*BACKUP*
+"* (Updated)*"
+"* (LSTM v2)*"
+"* - Final Version*"

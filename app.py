@@ -63,12 +63,76 @@ st.set_page_config(
 # ──────────────────────────────────────────────
 @st.cache_data(ttl=3600, show_spinner="Fetching historical data…")
 def load_historical_data(city: str) -> pd.DataFrame:
-    """Fetch, preprocess, and feature-engineer historical data."""
-    from data.acquisition import fetch_meteostat_historical
+    """Fetch, preprocess, and feature-engineer historical data.
+
+    Optionally bridges the gap between the most recent Meteostat observation
+    and today by querying the OWM One Call 3.0 timemachine endpoint for the
+    intervening days. This requires the paid One Call by Call subscription
+    and is gated on ``OWM_HISTORY_BRIDGE_ENABLED``. If the bridge call fails
+    or returns no rows, the pipeline silently falls back to Meteostat-only
+    history.
+    """
+    from data.acquisition import (
+        fetch_meteostat_historical, fetch_owm_history_range,
+        DataAcquisitionError,
+    )
     from data.preprocessing import preprocess_pipeline
     from data.feature_engineering import engineer_features
+    from config.settings import (
+        OWM_HISTORY_BRIDGE_ENABLED,
+        OWM_HISTORY_BRIDGE_MAX_DAYS,
+        OPENWEATHERMAP_API_KEY,
+    )
 
     raw = fetch_meteostat_historical(city=city, use_cache=True)
+
+    if OWM_HISTORY_BRIDGE_ENABLED and OPENWEATHERMAP_API_KEY:
+        meteostat_end = raw.index.max()
+        today = pd.Timestamp.utcnow().tz_convert(None).normalize()
+        if pd.notna(meteostat_end):
+            gap_start = (meteostat_end + pd.Timedelta(days=1)).normalize()
+            # Cap bridge length so a misconfigured account doesn't fan out
+            # into thousands of API calls.
+            gap_days = (today - gap_start).days + 1
+            if 1 <= gap_days <= OWM_HISTORY_BRIDGE_MAX_DAYS:
+                logger.info(
+                    "OWM history bridge: requesting %d days for %s "
+                    "(%s to %s)",
+                    gap_days, city, gap_start.date(), today.date(),
+                )
+                try:
+                    bridge = fetch_owm_history_range(
+                        city=city,
+                        start_date=gap_start,
+                        end_date=today,
+                        use_cache=True,
+                    )
+                    if not bridge.empty:
+                        # Drop the `source` column before merging into the
+                        # main frame so downstream preprocessing sees a
+                        # consistent schema.
+                        bridge_clean = bridge.drop(
+                            columns=[c for c in ["source"] if c in bridge.columns]
+                        )
+                        # Align columns: keep the union of Meteostat + OWM
+                        # columns, fill missing with NaN so the cleaning
+                        # pipeline's plausibility filter still applies.
+                        all_cols = list(
+                            dict.fromkeys(list(raw.columns) + list(bridge_clean.columns))
+                        )
+                        raw = raw.reindex(columns=all_cols)
+                        bridge_clean = bridge_clean.reindex(columns=all_cols)
+                        raw = pd.concat([raw, bridge_clean]).sort_index()
+                except DataAcquisitionError as exc:
+                    logger.warning("OWM history bridge unavailable: %s", exc)
+                except Exception as exc:
+                    logger.warning("OWM history bridge failed: %s", exc)
+            elif gap_days > OWM_HISTORY_BRIDGE_MAX_DAYS:
+                logger.warning(
+                    "OWM history gap (%d days) exceeds cap %d — bridge skipped.",
+                    gap_days, OWM_HISTORY_BRIDGE_MAX_DAYS,
+                )
+
     cleaned = preprocess_pipeline(raw, verbose=False)
     featured = engineer_features(cleaned, drop_na_rows=True)
     return featured
@@ -111,7 +175,11 @@ def train_models(city: str):
     lstm_test_metrics = {}
 
     if not lstm.load():
-        if lstm.build(n_features=split.X_train.shape[1], n_targets=split.y_train.shape[1]):
+        if lstm.build(
+            n_features=split.X_train.shape[1],
+            n_targets=split.y_train.shape[1],
+            target_names=list(split.y_train.columns),
+        ):
             X_train_seq, y_train_seq = create_lstm_sequences(split.X_train, split.y_train)
             X_val_seq, y_val_seq = create_lstm_sequences(split.X_val, split.y_val)
             lstm.train(X_train_seq, y_train_seq, X_val_seq, y_val_seq)
@@ -163,18 +231,32 @@ def generate_rf_forecast(rf, featured_data, artifacts):
 
 
 def generate_lstm_forecast(lstm, artifacts):
-    """Generate 7-day LSTM forecast from last 30 days."""
-    try:
-        X_train = artifacts["X_train"]
-        last_window = X_train.iloc[-LSTM_LOOKBACK_WINDOW:].values.astype(np.float32)
+    """Generate 7-day LSTM forecast from the last 30 days of full historical data.
 
-        if len(last_window) < LSTM_LOOKBACK_WINDOW:
+    Important: the lookback window is taken from the **full feature-engineered
+    history** (which ends at the most recent available observation), NOT from
+    the training split. Using X_train here would anchor the forecast to the
+    end of training data (early 2024 with a 70/15/15 split), which would
+    misalign with the RF and OWM forecasts that start from "today".
+    """
+    try:
+        featured = artifacts["featured_data"]
+        feature_cols = artifacts["feature_cols"]
+        feature_scaler = artifacts["feature_scaler"]
+
+        # Take the most recent `lookback` rows of engineered features
+        recent = featured[feature_cols].tail(LSTM_LOOKBACK_WINDOW)
+        if len(recent) < LSTM_LOOKBACK_WINDOW:
             logger.warning("Not enough data for LSTM lookback window.")
             return None
 
-        last_date = X_train.index.max()
+        # Scale with the training-fitted scaler (no leakage — scaler was
+        # fit on train rows only inside splitting.py).
+        recent_scaled = feature_scaler.transform(recent.values).astype(np.float32)
+
+        last_date = featured.index.max()
         forecast = lstm.forecast_7day(
-            recent_features_scaled=last_window,
+            recent_features_scaled=recent_scaled,
             target_scaler=artifacts["target_scaler"],
             target_cols=artifacts["target_cols"],
             last_date=last_date,

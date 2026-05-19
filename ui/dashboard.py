@@ -138,12 +138,76 @@ def render_forecast_comparison(
     rf_forecast: Optional[pd.DataFrame],
     lstm_forecast: Optional[pd.DataFrame],
 ):
-    """Render an interactive comparison chart of the three forecast sources."""
+    """Render an interactive comparison chart of the three forecast sources.
+
+    The three forecasts can legitimately cover different date ranges:
+      • OWM forecast is anchored to "today + 1..7"
+      • RF / LSTM forecasts are anchored to "historical_data_end + 1..7"
+    Meteostat historical data typically lags real-time by several months,
+    so these ranges may not overlap. The chart uses a real datetime x-axis
+    so each series is plotted at its actual date, and a small notice is
+    shown when the ranges differ.
+    """
     st.markdown("## 📊 7-Day Forecast Comparison")
 
     if owm_forecast is None or owm_forecast.empty:
         st.warning("Forecast data unavailable.")
         return
+
+    # Compute date ranges for the alignment banner. Each forecast frame may
+    # have a tz-aware or tz-naive DatetimeIndex (OWM is tz-aware UTC, our
+    # model outputs are tz-naive); normalise to tz-naive so the comparison
+    # doesn't raise.
+    def _range(df):
+        if df is None or df.empty or not hasattr(df.index, "min"):
+            return None
+        idx = df.index
+        try:
+            if getattr(idx, "tz", None) is not None:
+                idx = idx.tz_convert(None) if idx.tz is not None else idx
+        except (AttributeError, TypeError):
+            pass
+        try:
+            idx = idx.tz_localize(None) if getattr(idx, "tz", None) is not None else idx
+        except (AttributeError, TypeError):
+            pass
+        return idx.min(), idx.max()
+
+    owm_r = _range(owm_forecast)
+    rf_r = _range(rf_forecast)
+    lstm_r = _range(lstm_forecast)
+
+    ranges_misaligned = False
+    if owm_r and rf_r and (rf_r[0] > owm_r[1] or rf_r[1] < owm_r[0]):
+        ranges_misaligned = True
+    if owm_r and lstm_r and (lstm_r[0] > owm_r[1] or lstm_r[1] < owm_r[0]):
+        ranges_misaligned = True
+
+    if ranges_misaligned:
+        msg_parts = []
+        if owm_r:
+            msg_parts.append(
+                f"**OWM API**: {owm_r[0]:%d %b %Y} – {owm_r[1]:%d %b %Y} (live "
+                f"7-day forecast from today)"
+            )
+        if rf_r:
+            msg_parts.append(
+                f"**Random Forest**: {rf_r[0]:%d %b %Y} – {rf_r[1]:%d %b %Y} "
+                f"(7 days after end of historical training data)"
+            )
+        if lstm_r:
+            msg_parts.append(
+                f"**LSTM**: {lstm_r[0]:%d %b %Y} – {lstm_r[1]:%d %b %Y} "
+                f"(7 days after end of historical training data)"
+            )
+        st.info(
+            "ℹ️ **Each model is plotted at its own forecast horizon.** "
+            "Meteostat historical data is published with a lag, so the "
+            "RF and LSTM forecasts anchor to the most recent observed day "
+            "rather than today. The x-axis below uses real dates, so each "
+            "series sits at the days it actually predicts.\n\n"
+            + "\n\n".join("- " + p for p in msg_parts)
+        )
 
     tabs = st.tabs(["Temperature", "Precipitation", "Humidity", "Wind Speed"])
 
@@ -158,12 +222,11 @@ def render_forecast_comparison(
         with tab:
             fig = go.Figure()
 
-            # OWM (API) forecast
+            # OWM (API) forecast — plotted on a real datetime axis so models
+            # forecasting different windows don't visually overlap by accident.
             if var in owm_forecast.columns:
-                dates = [d.strftime("%a %d %b") if hasattr(d, "strftime") else str(d)
-                         for d in owm_forecast.index]
                 fig.add_trace(go.Scatter(
-                    x=dates,
+                    x=owm_forecast.index,
                     y=owm_forecast[var],
                     name="OpenWeatherMap API",
                     mode="lines+markers",
@@ -173,10 +236,8 @@ def render_forecast_comparison(
 
             # RF forecast
             if rf_forecast is not None and var in rf_forecast.columns:
-                dates_rf = [d.strftime("%a %d %b") if hasattr(d, "strftime") else str(d)
-                            for d in rf_forecast.index]
                 fig.add_trace(go.Scatter(
-                    x=dates_rf,
+                    x=rf_forecast.index,
                     y=rf_forecast[var],
                     name="Random Forest",
                     mode="lines+markers",
@@ -184,12 +245,10 @@ def render_forecast_comparison(
                     marker=dict(size=8, symbol="diamond"),
                 ))
 
-            # LSTM forecast
+            # LSTM forecast — only show if this variable was actually predicted.
             if lstm_forecast is not None and var in lstm_forecast.columns:
-                dates_lstm = [d.strftime("%a %d %b") if hasattr(d, "strftime") else str(d)
-                              for d in lstm_forecast.index]
                 fig.add_trace(go.Scatter(
-                    x=dates_lstm,
+                    x=lstm_forecast.index,
                     y=lstm_forecast[var],
                     name="LSTM Neural Network",
                     mode="lines+markers",
@@ -197,12 +256,25 @@ def render_forecast_comparison(
                     marker=dict(size=8, symbol="square"),
                 ))
 
-            fig.update_layout(
+            # If only the OWM line is present for this variable, label the
+            # chart so the user knows there's no comparison happening here.
+            only_owm = (
+                (rf_forecast is None or var not in rf_forecast.columns)
+                and (lstm_forecast is None or var not in lstm_forecast.columns)
+            )
+            subtitle = (
+                f"Only OWM forecasts this variable — RF and LSTM target temp "
+                f"and wind only."
+                if only_owm and var in owm_forecast.columns else None
+            )
+
+            layout_kwargs = dict(
                 yaxis_title=ylabel,
                 xaxis_title="",
+                xaxis=dict(type="date", tickformat="%a %d %b"),
                 template="plotly_white",
                 height=350,
-                margin=dict(l=60, r=20, t=30, b=40),
+                margin=dict(l=60, r=20, t=50 if subtitle else 30, b=40),
                 legend=dict(
                     orientation="h",
                     yanchor="bottom",
@@ -212,6 +284,11 @@ def render_forecast_comparison(
                 ),
                 hovermode="x unified",
             )
+            if subtitle:
+                layout_kwargs["title"] = dict(
+                    text=subtitle, x=0.5, font=dict(size=12, color="#777")
+                )
+            fig.update_layout(**layout_kwargs)
 
             st.plotly_chart(fig, use_container_width=True)
 
@@ -308,9 +385,11 @@ def render_recommendation(recommendation: Dict):
 
     # Guardrail indicator
     if recommendation.get("was_validated"):
+        n_missing = len(recommendation["missing_items"])
+        noun = "item was" if n_missing == 1 else "items were"
         st.warning(
-            f"⚠️ **Safety guardrails activated**: {len(recommendation['missing_items'])} "
-            f"mandatory items were added to ensure weather-appropriate advice."
+            f"⚠️ **Safety guardrails activated**: {n_missing} "
+            f"mandatory {noun} added to ensure weather-appropriate advice."
         )
 
     # Main recommendation text
@@ -479,13 +558,15 @@ def render_circular_loop():
 # Forecast Data Table
 # ──────────────────────────────────────────────
 def render_forecast_table(forecast_df: pd.DataFrame, label: str = "Forecast"):
-    """Show a formatted data table of the forecast."""
+    """Show a formatted data table of the forecast.
+
+    Numeric columns are cast to float64 before rounding so float32 noise
+    (e.g. ``8.699999809265137``) doesn't leak into the displayed table.
+    """
     with st.expander(f"📋 {label} — Raw Data Table"):
         display_df = forecast_df.copy()
-        # Format numeric columns
         for col in display_df.select_dtypes(include=[np.number]).columns:
-            display_df[col] = display_df[col].round(1)
-        # Format index
+            display_df[col] = display_df[col].astype("float64").round(1)
         if hasattr(display_df.index, "strftime"):
             display_df.index = display_df.index.strftime("%a %d %b %Y")
         st.dataframe(display_df, use_container_width=True)
