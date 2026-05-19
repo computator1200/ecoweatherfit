@@ -27,10 +27,10 @@ EcoWeatherFit is a unified digital platform that predicts 7-day weather conditio
 │   DATA LAYER    │   FORECASTING LAYER   │  RECOMMENDATION   │
 │                 │                       │      ENGINE        │
 │  Meteostat API  │  Random Forest Model  │                   │
-│  (Historical)   │  (Baseline: R²=0.99)  │  Gemini GenAI     │
-│                 │                       │       +            │
-│  OpenWeatherMap │  LSTM Neural Network  │  Heuristic Rules   │
-│  (Live/Forecast)│  (30-day → 7-day)     │  (Safety Guards)   │
+│  (Historical)   │  (RF baseline +       │  Gemini GenAI     │
+│                 │   recursive 7-day)    │       +            │
+│  OpenWeatherMap │  LSTM v2 (BiLSTM +    │  Heuristic Rules   │
+│  (Live/Forecast)│   per-target heads)   │  (Safety Guards)   │
 │                 │                       │       +            │
 │  Preprocessing  │  Evaluation Metrics   │  Sustainability    │
 │  & Feature Eng. │  (MAE, RMSE, R²)      │  (Circular Loop)   │

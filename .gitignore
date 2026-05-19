@@ -30,6 +30,7 @@ Thumbs.db
 *.docx
 *.pdf
 *.zip
+*.txt
 ~$*
 ~*.tmp
 
