@@ -13,4 +13,10 @@ services:
       - ./cache:/app/cache
       - ./logs:/app/logs
       - ./models/saved:/app/models/saved
+      # Persist the SQLite user database on the host so accounts survive
+      # container restarts. The data/ directory also contains the data
+      # pipeline modules — the mount overlays the whole folder, but the
+      # host copy already has those same modules, so this is a no-op for
+      # code and adds persistence for users.db.
+      - ./data:/app/data
     restart: unless-stopped

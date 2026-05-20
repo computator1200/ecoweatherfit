@@ -25,6 +25,15 @@ google-generativeai>=0.4,<1.0
 
 # Web UI
 streamlit>=1.30,<2.0
+extra-streamlit-components>=0.1.71   # Browser-cookie manager for JWT session persistence
+
+# Authentication & persistence
+SQLAlchemy>=2.0,<3.0        # ORM for the user / preferences / wardrobe / history tables
+passlib[bcrypt]>=1.7,<2.0   # Password hashing wrapper
+bcrypt<4.1                   # Pinned: bcrypt 4.1+ raises a hard error on >72-byte inputs that passlib's
+                             # self-test sends during scheme detection — keeps passlib's bcrypt backend usable.
+PyJWT>=2.8,<3.0             # JWT session tokens (HS256, 7-day TTL)
+email-validator>=2.0,<3.0   # Robust email format validation at signup
 
 # Testing
 pytest>=7.4,<9.0

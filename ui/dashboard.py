@@ -46,16 +46,35 @@ def render_header():
 # ──────────────────────────────────────────────
 # Sidebar
 # ──────────────────────────────────────────────
-def render_sidebar() -> Dict:
-    """Render the sidebar and return user selections."""
+def render_sidebar(defaults: Optional[Dict] = None) -> Dict:
+    """Render the sidebar and return user selections.
+
+    ``defaults`` is the dict returned by ``auth.render_user_menu`` — when
+    present, it pre-fills the city / gender / style / eco-tip selections from
+    the user's persisted preferences so returning users don't have to reset
+    their context on every visit.
+    """
     from config.settings import DEFAULT_LOCATIONS
+
+    defaults = defaults or {}
+    cities = list(DEFAULT_LOCATIONS.keys())
+    genders = ["Unisex", "Feminine", "Masculine"]
+    styles = ["Casual", "Smart Casual", "Formal", "Sporty", "Bohemian"]
+
+    def _index(options, value, fallback=0):
+        """Return options.index(value) if value is in options, else fallback."""
+        if value is None:
+            return fallback
+        # Compare case-insensitively to absorb the stored-lowercase / displayed-titlecase mismatch.
+        norm = {o.lower(): i for i, o in enumerate(options)}
+        return norm.get(str(value).lower(), fallback)
 
     st.sidebar.markdown("## 🌍 Location & Profile")
 
     city = st.sidebar.selectbox(
         "Select City",
-        options=list(DEFAULT_LOCATIONS.keys()),
-        index=0,
+        options=cities,
+        index=_index(cities, defaults.get("default_city"), 0),
         help="Choose your UK city for local weather forecasting.",
     )
 
@@ -64,21 +83,27 @@ def render_sidebar() -> Dict:
 
     gender = st.sidebar.selectbox(
         "Gender Presentation",
-        ["Unisex", "Feminine", "Masculine"],
-        index=0,
+        genders,
+        index=_index(genders, defaults.get("gender_presentation"), 0),
     )
 
     style = st.sidebar.selectbox(
         "Style Preference",
-        ["Casual", "Smart Casual", "Formal", "Sporty", "Bohemian"],
-        index=0,
+        styles,
+        index=_index(styles, defaults.get("style_preference"), 0),
     )
 
     st.sidebar.markdown("---")
     st.sidebar.markdown("### ♻️ Sustainability")
 
-    show_eco = st.sidebar.checkbox("Show eco-facts & tips", value=True)
-    show_loop = st.sidebar.checkbox("Show Circular Fashion Loop", value=True)
+    show_eco = st.sidebar.checkbox(
+        "Show eco-facts & tips",
+        value=bool(defaults.get("show_eco_tips", True)),
+    )
+    show_loop = st.sidebar.checkbox(
+        "Show Circular Fashion Loop",
+        value=bool(defaults.get("show_circular_loop", True)),
+    )
 
     st.sidebar.markdown("---")
 
@@ -523,7 +548,14 @@ def render_sustainability(advice: SustainabilityAdvice, show_loop: bool = True):
 
 
 def render_circular_loop():
-    """Display the Circular Fashion Loop infographic."""
+    """Display the Circular Fashion Loop infographic.
+
+    Steps that include outbound ``links`` (currently steps 4 and 5) render
+    them as small pill-shaped anchor tags inside the card. Links open in a
+    new tab with ``rel="noopener noreferrer"``. Link destinations are
+    chosen in ``recommendations.sustainability`` to be independent and
+    non-affiliate; see the docstring there for the rationale.
+    """
     st.markdown("### The Circular Fashion Loop")
 
     engine = SustainabilityEngine()
@@ -533,16 +565,36 @@ def render_circular_loop():
     for i, step in enumerate(loop):
         with cols[i]:
             colour = "#4CAF50" if step["is_priority"] else "#666"
+            bg = "#E8F5E9" if step["is_priority"] else "#f9f9f9"
+
+            # Build the optional outbound-link block. Pill-shaped anchors,
+            # mid-green on white, scaled to fit inside the small card.
+            links_html = ""
+            if step.get("links"):
+                pills = "".join(
+                    f'<a href="{link["url"]}" target="_blank" rel="noopener noreferrer" '
+                    f'style="display:inline-block; margin:2px; padding:2px 8px; '
+                    f'font-size:0.7rem; line-height:1.2; '
+                    f'color:#1B4332; background:#FFFFFF; '
+                    f'border:1px solid #52B788; border-radius:999px; '
+                    f'text-decoration:none; font-weight:600;">{link["label"]} ↗</a>'
+                    for link in step["links"]
+                )
+                links_html = (
+                    f'<div style="margin-top:6px; line-height:1.4;">{pills}</div>'
+                )
+
             st.markdown(
                 f"""
                 <div style="text-align: center; padding: 0.5rem;
                      border: 2px solid {colour}; border-radius: 10px;
-                     background: {'#E8F5E9' if step['is_priority'] else '#f9f9f9'};">
+                     background: {bg};">
                     <div style="font-size: 1.8rem;">{step['icon']}</div>
                     <div style="font-weight: bold; font-size: 0.85rem;">{step['name']}</div>
                     <div style="font-size: 0.7rem; color: #666; margin-top: 4px;">
-                        {step['description'][:60]}...
+                        {step['description'][:60]}{'…' if len(step['description']) > 60 else ''}
                     </div>
+                    {links_html}
                 </div>
                 """,
                 unsafe_allow_html=True,
@@ -550,7 +602,9 @@ def render_circular_loop():
 
     st.caption(
         "Priority flows left to right: always start by reusing what you own. "
-        "Buying new is the absolute last resort."
+        "Buying new is the absolute last resort. The outbound links on steps 4 "
+        "and 5 point at independent, non-affiliate destinations chosen to "
+        "minimise greenwashing risk."
     )
 
 

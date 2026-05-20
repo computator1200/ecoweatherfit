@@ -268,6 +268,54 @@ def generate_lstm_forecast(lstm, artifacts):
 
 
 # ──────────────────────────────────────────────
+# Forecast-history persistence helper
+# ──────────────────────────────────────────────
+def _persist_forecast_history(user_id, city, forecast_df, recommendation):
+    """Serialise the day's recommendation + constraints into the auth.ForecastHistory row.
+
+    Tolerates partial data — any missing field collapses to an empty string
+    rather than aborting the call. The constraints object is a
+    ``DailyConstraints`` dataclass; we ``asdict`` it (lists of primitives only,
+    so the resulting JSON is small and stable).
+    """
+    import json
+    from dataclasses import asdict, is_dataclass
+    from auth import record_forecast
+
+    forecast_summary = ""
+    if forecast_df is not None and not forecast_df.empty:
+        head = forecast_df.head(1).to_dict(orient="records")[0]
+        parts = []
+        for k in ("temp", "wind_speed", "humidity", "precipitation", "pop"):
+            if k in head and head[k] is not None:
+                v = head[k]
+                parts.append(f"{k}={float(v):.1f}" if isinstance(v, (int, float)) else f"{k}={v}")
+        forecast_summary = ", ".join(parts)
+
+    rec_text = (
+        recommendation.get("recommendation")
+        or recommendation.get("text")
+        or ""
+    )
+
+    constraints_obj = recommendation.get("constraints")
+    constraints_json = None
+    if is_dataclass(constraints_obj):
+        try:
+            constraints_json = json.dumps(asdict(constraints_obj), default=str)
+        except (TypeError, ValueError):
+            constraints_json = None
+
+    record_forecast(
+        user_id=user_id,
+        city=city,
+        forecast_summary=forecast_summary,
+        recommendation_text=str(rec_text)[:4000],
+        constraints_json=constraints_json,
+    )
+
+
+# ──────────────────────────────────────────────
 # Main Application
 # ──────────────────────────────────────────────
 def main():
@@ -285,9 +333,51 @@ def main():
     )
     from recommendations.gemini_integration import GeminiAdvisor
     from recommendations.sustainability import SustainabilityEngine
+    from auth import (
+        init_db,
+        render_auth_gate,
+        render_user_menu,
+        render_wardrobe_manager,
+        render_history_panel,
+        record_forecast,
+        update_preferences,
+    )
+
+    # One-off database initialisation. Idempotent (CREATE TABLE IF NOT EXISTS).
+    init_db()
 
     render_header()
-    user = render_sidebar()
+
+    # Auth gate: short-circuits the rest of the app when no valid session exists.
+    # Also handles ?verify_token=<uuid> email-verification deep links.
+    user_id = render_auth_gate()
+    if user_id is None:
+        return
+
+    # User is authenticated — render the per-user sidebar block (account info,
+    # logout, persisted preferences) and use those preferences as defaults
+    # for the rest of the sidebar.
+    user_prefs = render_user_menu(user_id) or {}
+    user = render_sidebar(defaults=user_prefs)
+
+    # Persist any sidebar changes back to the DB so they survive the next visit.
+    try:
+        update_preferences(
+            user_id,
+            default_city=user["city"],
+            gender_presentation=user["gender"].title(),
+            style_preference=user["style_preference"].title(),
+            show_eco_tips=user["show_eco"],
+            show_circular_loop=user["show_loop"],
+        )
+    except Exception as exc:
+        logger.warning("Could not persist preferences for user %s: %s", user_id, exc)
+
+    # Wardrobe + history live in the sidebar under expanders so they don't crowd
+    # the main panel when collapsed.
+    with st.sidebar:
+        render_wardrobe_manager(user_id)
+        render_history_panel(user_id)
 
     city = user["city"]
     user_profile = {
@@ -378,6 +468,20 @@ def main():
                     day_index=0,
                 )
             render_recommendation(recommendation)
+
+            # Persist this recommendation to the user's forecast history so
+            # they can review it on a future visit.
+            try:
+                _persist_forecast_history(
+                    user_id=user_id,
+                    city=city,
+                    forecast_df=rec_forecast,
+                    recommendation=recommendation,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "Could not persist forecast history for user %s: %s", user_id, exc
+                )
 
             # Week summary
             with st.spinner("Generating weekly wardrobe plan…"):

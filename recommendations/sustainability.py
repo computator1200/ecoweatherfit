@@ -148,7 +148,22 @@ class SustainabilityEngine:
         )
 
     def get_circular_loop_display(self) -> List[Dict]:
-        """Return the Circular Fashion Loop as structured data for UI."""
+        """Return the Circular Fashion Loop as structured data for UI.
+
+        Steps 4 ("Buy Second-Hand") and 5 ("Buy Sustainable") include
+        outbound ``links`` lists pointing at independent marketplaces and an
+        ethical-brand directory respectively. The intent is to keep the loop
+        actionable: the moment a user decides they do need to acquire an
+        item, the secondhand-first hierarchy is one click away.
+
+        Link choices are deliberate:
+        * Charity Retail Association: neutral, non-commercial UK charity-shop
+          finder, not tied to any single charity.
+        * Vinted / Depop: the two dominant peer-to-peer secondhand
+          marketplaces in the UK by user base.
+        * Good On You: independent ethical-brand rating directory rather
+          than a specific brand endorsement, sidestepping greenwashing risk.
+        """
         icons = ["🔄", "🧥", "🤝", "♻️", "🌱"]
         descriptions = [
             "Check your existing wardrobe first — you probably already have what you need.",
@@ -157,6 +172,17 @@ class SustainabilityEngine:
             "Browse charity shops, Vinted, or Depop for pre-loved alternatives.",
             "Only buy new as a last resort — choose sustainable, ethical brands.",
         ]
+        # Per-step outbound links: independent, non-affiliate, non-product-specific.
+        links_per_step: Dict[int, List[Dict[str, str]]] = {
+            3: [  # step index 3 = "Buy Second-Hand"
+                {"label": "Charity shops", "url": "https://www.charityretail.org.uk/find-a-shop/"},
+                {"label": "Vinted",        "url": "https://www.vinted.co.uk/"},
+                {"label": "Depop",         "url": "https://www.depop.com/"},
+            ],
+            4: [  # step index 4 = "Buy Sustainable (Last Resort)"
+                {"label": "Good On You",   "url": "https://goodonyou.eco/"},
+            ],
+        }
         return [
             {
                 "step": i + 1,
@@ -164,6 +190,7 @@ class SustainabilityEngine:
                 "icon": icons[i],
                 "description": descriptions[i],
                 "is_priority": i == 0,
+                "links": links_per_step.get(i, []),
             }
             for i, name in enumerate(self.CIRCULAR_LOOP)
         ]

@@ -52,6 +52,34 @@ OWM_HISTORY_BRIDGE_ENABLED = (
 OWM_HISTORY_BRIDGE_MAX_DAYS = int(os.getenv("OWM_HISTORY_BRIDGE_MAX_DAYS", "180"))
 
 # ──────────────────────────────────────────────
+# 2b. AUTHENTICATION & PERSISTENCE
+# ──────────────────────────────────────────────
+# All values loadable from environment so the same code runs in dev (SQLite,
+# dev-fallback email) and production (managed Postgres, real SMTP).
+DATABASE_URL  = os.getenv("DATABASE_URL", f"sqlite:///{PROJECT_ROOT}/data/users.db")
+JWT_SECRET    = os.getenv("JWT_SECRET", "")       # blank → auto-generated to cache/.jwt_secret
+JWT_TTL_HOURS = int(os.getenv("JWT_TTL_HOURS", "168"))  # 7-day session
+
+# Email-verification SMTP. If any of HOST/USER/PASS/FROM are blank the system
+# falls back to a development mode where the verification link is displayed
+# in the UI instead of being sent — see auth/email_service.py.
+SMTP_HOST = os.getenv("SMTP_HOST", "")
+SMTP_PORT = int(os.getenv("SMTP_PORT", "587"))
+SMTP_USER = os.getenv("SMTP_USER", "")
+SMTP_PASS = os.getenv("SMTP_PASS", "")
+SMTP_FROM = os.getenv("SMTP_FROM", "noreply@ecoweatherfit.local")
+
+# Base URL used when building verification links in the email body.
+APP_BASE_URL = os.getenv("APP_BASE_URL", "http://localhost:8501")
+
+# Pre-shared signup code. When set, the signup form requires the user to
+# enter this exact string before an account is created, and the resulting
+# account is created with email_verified=True (no verification email is
+# sent and no link is displayed). This is the abuse-prevention path used
+# when SMTP is not configured — see auth/service.py::signup.
+SIGNUP_CODE = os.getenv("SIGNUP_CODE", "")
+
+# ──────────────────────────────────────────────
 # 3. LOCATION DEFAULTS — UK‑Focused
 # ──────────────────────────────────────────────
 DEFAULT_LOCATIONS = {

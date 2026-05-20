@@ -48,3 +48,12 @@ saved output/
 "* (Updated)*"
 "* (LSTM v2)*"
 "* - Final Version*"
+
+# Persistent state (SQLite DB, JWT secret) — these contain user data / secrets
+data/users.db
+data/users.db-journal
+cache/.jwt_secret
+SPEC.md
+STATUS.md
+scripts/build_showcase_deck.js
+EcoWeatherFit_Showcase.pptx
